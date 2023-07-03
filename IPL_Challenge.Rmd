@@ -1,0 +1,651 @@
+---
+title: "IPL Runs Earned Challenge"
+author: "Sean Hellingman"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+```{r packages, echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(14)
+#rm(list = ls())
+if(!require(readr)) install.packages("readr")
+library(readr)
+if(!require(tidyverse)) install.packages("tidyverse")
+library(tidyverse)
+if(!require(ggplot2)) install.packages("ggplot2")
+library(ggplot2)
+if(!require(fitdistrplus)) install.packages("fitdistrplus")
+library(fitdistrplus)
+if(!require(EnvStats)) install.packages("EnvStats")
+library(EnvStats)
+if(!require(caret)) install.packages("caret")
+library(caret)
+if(!require(AER)) install.packages("AER")
+library(AER)
+if(!require(iccCounts)) install.packages("iccCounts")
+library(iccCounts)
+if(!require(lme4)) install.packages("lme4")
+library(lme4)
+if(!require(knitr)) install.packages("knitr")
+library(knitr)
+if(!require(kableExtra)) install.packages("kableExtra")
+library(kableExtra)
+if(!require(broom)) install.packages("broom")
+library(broom)
+if(!require(plotly)) install.packages("plotly")
+library(plotly)
+if(!require(sjPlot)) install.packages("sjPlot")
+library(sjPlot)
+if(!require(randomForest)) install.packages("randomForest")
+library(randomForest)
+#For Markdown
+#install.packages("tinytex")
+#tinytex::install_tinytex()
+```
+
+
+<h3>Introduction</h3>
+
+This challenge uses aggregate summaries of runs scored per over for the
+first innings of Indian Premier League matches to predict runs earned.
+
+
+<h3>Question 1</h3>
+
+*Derive a variable runs earned that is the total runs scored from any combination of overs_remaining or wickets_remaining.*
+
+```{r data,message = FALSE}
+ipl <- read_csv("ipl.csv")
+```
+
+<h4>Part a</h4>
+
+The following function derives the dependent variable of runs earned for this analysis. 
+
+```{r runs_earned}
+
+
+REarned <- function(x) { #Right
+x <- x %>%
+dplyr::group_by(id) %>%
+dplyr::mutate(Total = sum(runs_scored),runs_earned = Total + runs_scored - cumsum(runs_scored),Total = NULL)
+}
+
+
+ipl <- REarned(ipl)
+
+
+```
+
+
+
+
+<h4>Part b</h4>
+
+*Identify if there are any outliers in runs_earned and describe what you find.*
+
+Initial plots examine the shapes of the variables and possible distributions of the runs earned variable.
+
+
+```{r Normality, warning=FALSE}
+par(mfrow=c(1,1))
+
+hist(ipl$runs_earned,main="Histogram of Runs Earned",xlab = "Runs Earned")
+#Some outliers in right tail
+ipl$year <- format(ipl$date, format = "%Y")
+
+#table(ipl$runs_earned)
+#table(ipl$year)
+#table(ipl$id)
+#summary(ipl$runs_earned)
+
+
+#plot(ipl$overs_remaining, ipl$runs_earned)
+
+qqnorm(ipl$runs_earned, pch = 1, frame = FALSE) #Not Normal
+qqline(ipl$runs_earned, col = "steelblue", lwd = 2)
+
+
+#Potential distributions
+descdist(ipl$runs_earned, discrete=FALSE, boot=500)
+descdist(ipl$runs_earned, discrete=TRUE, boot=500)
+
+#Rosner Test Outliers detected?
+test <- rosnerTest(ipl$runs_earned,
+  k = round(0.01*nrow(ipl)))
+
+test$distribution
+test$n.outliers
+
+```
+
+When examining the plots of the overs remaining and wickets remaining as they directly relate to runs earned there appears to be outliers for each value of overs remaining. There is also obvious heteroskedasticity that will be explored further on in the analysis. 
+
+```{r Outlier_Plots, warning=FALSE}
+
+ggplot(ipl, aes(overs_remaining,runs_earned))+ 
+  geom_point()+
+  geom_smooth(method="lm", se=F)+
+  labs(title="Runs Earned by Overs Remaining",
+        x ="Overs Remaining", y = "Runs Earned")
+
+ggplot(ipl, aes(wickets_remaining,runs_earned))+ 
+  geom_point()+
+  geom_smooth(method="lm", se=F)+
+  labs(title="Runs Earned by Wickets Remaining",
+        x ="Wickets Remaining", y = "Runs Earned")
+
+
+```
+
+In order to deal with the outliers identified for each of the overs remaining all observations below the 0.01 and over the 0.99 quantiles were removed from the analysis. The plot below shows data without the identified outliers.
+
+```{r Outlier_Overs, warning=FALSE}
+
+#hist(subset(ipl$runs_earned,ipl$overs_remaining==16))
+
+
+ipl <- ipl %>%
+dplyr::group_by(overs_remaining) %>%
+dplyr::mutate(LOWQ = ifelse(runs_earned < quantile(runs_earned,.01), "Yes" , "No"),UPPQ = ifelse(runs_earned > quantile(runs_earned,.99), "Yes" , "No"))
+
+
+table(ipl$LOWQ)
+
+
+ggplot(subset(ipl,ipl$LOWQ == 'No' & ipl$UPPQ == 'No')
+       , aes(overs_remaining,runs_earned))+ 
+  geom_point()+
+  geom_smooth(method="lm", se=F)+
+  labs(title="Runs Earned by Overs Remaining",
+       subtitle = "Outliers Removed",
+        x ="Overs Remaining", y = "Runs Earned")
+
+```
+
+
+
+
+<h4>Part c</h4>
+
+The outliers identified in \textit{Part b} were removed from the analysis leaving a total of 17891 observations. 
+
+
+```{r Outlier_Overs_Remove, warning=FALSE}
+
+
+ipl <- subset(ipl,ipl$LOWQ == 'No' & ipl$UPPQ == 'No' )
+
+
+```
+
+<h3>Question 2</h3>
+
+*Create a visualization to show how runs earned varies with overs and wickets remaining. Interpret the relationship you observe.*
+
+The plots in *Question 1* indicate that there is a positive linear correlation between runs earned and both overs and wickets remaining. This observation makes sense as teams with more overs and wickets remaining have more opportunities to score runs. 
+
+
+
+The three dimensional interactive plot below further supports the assumption of a positive correlation. Furthermore, there appears to be heteroskedasticity with a larger variability present when teams have more overs and wickets remaining. The data will have to be transformed, or any models built to estimate the average expected runs will need to be able to deal with this heteroskedasticity.     
+
+```{r Plots}
+
+fig <- plot_ly(ipl, y = ~wickets_remaining, z = ~runs_earned, x = ~overs_remaining, color = ~runs_earned)
+fig <- fig %>% add_markers()
+fig <- fig %>% layout(scene = list(xaxis = list(title = 'Overs Remaining'),
+                     yaxis = list(title = 'Wickets Remaining'),
+                     zaxis = list(title = 'Runs Earned')))
+
+fig
+
+```
+
+
+<h5>Batting Team</h5>
+
+
+The next two plots split the data by the batting team to examine any potential impacts of who is batting on the relationship between overs remaining or wickets remaining and earned runs.  
+```{r Plots3, warning=FALSE}
+
+
+fig1 <- plot_ly(ipl,  y = ~runs_earned, x = ~overs_remaining, color = ~batting_team)
+fig1 <- fig1 %>% add_markers()
+fig1 <- fig1 %>% layout(title = 'Runs Earned by Overs Remaining Colored by Batting Team',xaxis = list(title = 'Overs Remaining'),
+                     yaxis = list(title = 'Runs Earned'))
+
+fig1
+
+```
+
+The reader is able to select which batting teams they wish to include in the above plot and compare the shapes and spreads of the runs earned by overs remaining. For example, when only selecting the Chennai Super Kings and the Pune Warriors it appears, although not significantly, that the Chennai Super Kings earn more runs on average than the Pune Warriors. Furthermore, the variability of runs earned is much larger for the Chennai Super Kings.  
+
+
+
+```{r Plots4, warning=FALSE}
+
+
+fig2 <- plot_ly(ipl,  y = ~runs_earned, x = ~wickets_remaining, color = ~batting_team)
+fig2 <- fig2 %>% add_markers()
+fig2 <- fig2 %>% layout(title = 'Runs Earned by Wickets Remaining Colored by Batting Team',
+                        xaxis = list(title = 'Wickets Remaining'),
+                     yaxis = list(title = 'Runs Earned'))
+
+fig2
+
+```
+
+The above plot allows the reader to again select which batting teams they wish to compare with regards to runs earned and wickets remaining. Following the above example and comparing the Chennai Super Kings and the Pune Warriors, it appears that the slope is very similar and the variability of the Chennai Super Kings is larger. 
+
+
+<h5>Bowling Team</h5>
+
+The following plots allow the reader to select which bowling teams they wish to compare with regards to runs earned by overs remaining and wickets remaining.  
+
+```{r Plots5, warning=FALSE}
+
+
+fig3 <- plot_ly(ipl,  y = ~runs_earned, x = ~overs_remaining, color = ~bowling_team)
+fig3 <- fig3 %>% add_markers()
+fig3 <- fig3 %>% layout(title = 'Runs Earned by Overs Remaining Colored by Bowling Team',
+                        xaxis = list(title = 'Overs Remaining'),
+                     yaxis = list(title = 'Runs Earned'))
+
+fig3
+
+```
+
+ 
+
+
+
+```{r Plots6, warning=FALSE}
+
+
+fig2 <- plot_ly(ipl,  y = ~runs_earned, x = ~wickets_remaining, color = ~bowling_team)
+fig2 <- fig2 %>% add_markers()
+fig2 <- fig2 %>% layout(title = 'Runs Earned by Wickets Remaining Colored by Bowling Team',
+                        xaxis = list(title = 'Wickets Remaining'),
+                     yaxis = list(title = 'Runs Earned'))
+
+fig2
+
+```
+
+
+
+
+
+<h5>Interactions</h5>
+
+
+
+The next plot attempts to identify any interaction between wickets remaining and overs remaining as it may relate to runs earned.
+
+```{r PlotsINT}
+
+ipl$WR <- factor(ipl$wickets_remaining)
+
+ggplot(ipl, aes(overs_remaining,runs_earned))+ 
+  geom_point()+
+  ylim(0, 255)+
+  geom_smooth(method="lm", se=T)+
+  facet_wrap(~WR, scale="free")+
+  labs(title="Runs Earned by Overs Remaining across Wickets Remaining (Interactions)",
+        x ="Overs Remaining", y = "Runs Earned")
+
+```
+
+This interaction plot above shows that teams who have many wickets remaining and few overs remaining earn more runs. In general, it appears that there is some kind of interaction between wickets remaining and overs remaining with regards to explaining runs earned. 
+
+
+
+<h3>Question 3</h3>
+
+*Build a model to estimate the average expected runs that can be earned from any possible combination of overs and wickets remaining. Write the mathematical description of your model and justify your choice. Show code to fit the model and evaluate it’s performance.*
+
+
+<h4>Model Construction and Description</h4>
+
+
+From *Question 2*, the runs earned variable appears to be normally distributed. With that in mind, a simple linear regression may be estimated. Models are estimated as,
+
+$runs\_earned$ = $\alpha$ + $\beta_1overs\_remaining$ +$\beta_2wickets\_remaining$+$\beta_3overs\_remaining*wickets\_remaining$+$\delta_ibatting\_team$
++$\delta_jbowling\_team$
+
+where $i$ and $j$ represent the team batting and bowling respectively. A second linear regression model with the overs remaining treated as a factor was also estimated. Wickets remaining was left as a continuous variable as the different levels were not significant as factors. 
+```{r OLS}
+
+
+lm1 <- lm(runs_earned~overs_remaining+wickets_remaining+
+            overs_remaining:wickets_remaining+batting_team+bowling_team,data=ipl)
+#summary(lm1)
+
+lm1%>%
+  tidy() %>%
+  kable(digits = 3,col.names = c("Variable", "Estimate", "S.E.", "Stat.", "p-value"),
+        align = c("l", "c", "c", "c", "c"),caption = 'OLS Regression Estimates')%>%
+    kable_classic_2(full_width = F, position = "left")%>%
+    footnote(general = "Adjusted R-Squared: 0.833",
+    general_title = "Note.",
+    footnote_as_chunk = TRUE)
+
+
+lm2 <- lm(runs_earned~factor(overs_remaining)+wickets_remaining+
+            overs_remaining:wickets_remaining+batting_team+bowling_team,data=ipl)
+#summary(lm2)
+
+lm2%>%
+  tidy() %>%
+  kable(digits = 3,col.names = c("Variable", "Estimate", "S.E.", "Stat.", "p-value"),
+        align = c("l", "c", "c", "c", "c"),caption = 'OLS Regression Estimates with Overs Remaining as a Factor')%>%
+    kable_classic_2(full_width = F, position = "left")%>%
+    footnote(general = "Adjusted R-Squared: 0.0.837",
+    general_title = "Note.",
+    footnote_as_chunk = TRUE)
+
+```
+
+
+
+<h5>Linear Regression Assumptions</h5>
+
+```{r OLS_Validation}
+
+par(mfrow=c(2,2))
+#OLS Model 1
+
+plot(lm1)
+
+#OLS Model 2
+plot(lm2)
+
+
+```
+
+
+Both models appear to be very similar. When checking some of the basic diagnostics it appears that while the plot of the residuals and fitted values fluctuate around zero, the variance is not constant. Furthermore, there appears to be some non-normality of the residuals in the tails. This may be addressed by transforming variables or adjusting which variables are included in the model. In this case, more flexible models will be used to address these potential issues.
+
+
+
+
+<h5>Generalized Linear Models</h5>
+
+
+Generalized linear models allow for more flexibility than linear regression models. Furthermore, as the task is modelling expected runs earned count specific models may be estimated within this class of models.
+
+
+Poisson count models may be used when the mean and the variance of the count variable is the same. This strong assumption was tested.  
+```{r Poission}
+P1 =glm(runs_earned~overs_remaining+wickets_remaining+
+          overs_remaining:wickets_remaining,family = poisson(link="log"),
+        data=ipl)
+P1%>%
+  tidy() %>%
+  kable(digits = 3,col.names = c("Variable", "Estimate", "S.E.", "Stat.", "p-value"),
+        align = c("l", "c", "c", "c", "c"),caption = 'Poisson Regression Estimates')%>%
+    kable_classic_2(full_width = F, position = "left")
+
+
+#Cameron & Trivedi (1990) Dispersion test
+dispersiontest(P1,trafo=1) #trafo = transformation function - linear specification
+dispersiontest(P1,trafo=2) #trafo = transformation function - quadratic specification
+
+```
+Overdispersion is significantly present and the more flexible negative binomial distribution is assumed.
+
+
+
+Model:
+
+count($runs\_earned$) = exp[$\alpha$ + $\beta_1overs\_remaining$ +$\beta_2wickets\_remaining$+$\beta_3overs\_remaining*wickets\_remaining$+$\delta_jbowling\_team$+$\gamma_ibatting_team$]
+
+where $j$ and $i$ represent the index for each team.
+
+
+NB <- glm.nb(runs_earned~overs_remaining+wickets_remaining+
+               overs_remaining:wickets_remaining+bowling_team+
+               batting_team,link="log",
+             data=subset(train.data,train.data$Top_1M == "No"))
+
+
+```{r NB}
+NB1 <- glm.nb(runs_earned~overs_remaining+wickets_remaining+
+            overs_remaining:wickets_remaining+batting_team+bowling_team,link="log",data=ipl)
+
+NB1%>%
+  tidy() %>%
+  kable(digits = 3,col.names = c("Variable", "Estimate", "S.E.", "Stat.", "p-value"),
+        align = c("l", "c", "c", "c", "c"),caption = 'Negative Binomial Regression Estimates')%>%
+    kable_classic_2(full_width = F, position = "left")
+
+
+NB2 <- glm.nb(runs_earned~factor(overs_remaining)+wickets_remaining+
+            overs_remaining:wickets_remaining+batting_team+bowling_team,link="log",data=ipl)
+
+
+NB2%>%
+  tidy() %>%
+  kable(digits = 3,col.names = c("Variable", "Estimate", "S.E.", "Stat.", "p-value"),
+        align = c("l", "c", "c", "c", "c"),caption = 'Negative Binomial Regression Estimates with Overs Remaining as a Factor')%>%
+    kable_classic_2(full_width = F, position = "left")
+
+
+```
+
+
+
+As the analysis is done from the point of view of the batting team the random intercepts portion of this analysis is chosen to be the batting team. Each team may have a different intercept for their batting abilities as it relates to runs earned. 
+
+
+Model:
+
+count($runs\_earned$) = exp[$\alpha$ + $\alpha_ibatting\_team$ + $\beta_1overs\_remaining$ +$\beta_2wickets\_remaining$+$\beta_3overs\_remaining*wickets\_remaining$+$\delta_jbowling\_team$]
+
+where $\alpha$ represents the fixed intercept, $\alpha_i$ represents the random intercept for team $i$, and $j$ represents the index for each bowling team.
+
+
+```{r ME_NB}
+
+MENB <- glmer.nb(runs_earned~overs_remaining+wickets_remaining+
+                 overs_remaining:wickets_remaining+bowling_team+ (1| batting_team),data=ipl,nAGQ=0)
+tab_model(MENB)
+
+
+
+```
+
+
+The estimated second source of variance from the batting team is very small. It does not appear that adding this random term in the model improves anything.
+
+
+
+<h4>Random Forest</h4>
+
+The random forest algorithm combines the output of multiple decision trees to reach a single result. It is more computationally demanding than the simple regression models presented earlier but it may be able to better predict runs earned. In this challenge, 500 models are tested per random forest call.  
+
+```{r Random Forest}
+ 
+RF1 <- randomForest(runs_earned~factor(overs_remaining)+wickets_remaining+
+            overs_remaining:wickets_remaining+batting_team+bowling_team,
+            data=ipl, proximity=TRUE)
+
+print(RF1)
+```
+
+
+
+<h4>Cross Validation</h4>
+
+In order to demonstrate the quality of the results ten-fold cross validation was conducted on each of the models focusing on prediction accuracy. Two measures of accuracy were used. The mean absolute error (MAE), and root mean squared error (RMSE) were used. Smaller values for mean absolute error (MAE) and root mean squared error (RMSE) are desired. 
+
+
+```{r Cross Validation}
+set.seed(14)
+
+CVIPL <- ipl 
+#shuffle
+CVIPL<-CVIPL[sample(nrow(CVIPL)),] 
+#Create 10 equally size folds
+folds <- cut(seq(1,nrow(CVIPL)),breaks=10,labels=FALSE)
+
+Prediction.Capability <- data.frame(matrix(ncol = 4, nrow = 0 )) #Dataframe for results
+x <- c("Model","Test_Number", "MAE","RMSE") #col names
+colnames(Prediction.Capability) <- x
+rm(x)
+PCLM <- Prediction.Capability
+PCPM <- Prediction.Capability
+PCNB <- Prediction.Capability
+PCNB.ME <- Prediction.Capability
+PCRF <- Prediction.Capability
+
+
+#Perform 10 fold cross validation
+for(i in 1:10){
+  #Segement your data by fold using the which() function 
+  testIndexes <- which(folds==i,arr.ind=TRUE)
+  testData <- CVIPL[testIndexes, ]
+  trainData <- na.omit(CVIPL[-testIndexes, ])
+  
+  
+  lm <- lm(runs_earned~factor(overs_remaining)+wickets_remaining+
+            overs_remaining:wickets_remaining+batting_team+bowling_team,
+            data=trainData)
+  
+  P <- glm(runs_earned~overs_remaining+wickets_remaining+
+          overs_remaining:wickets_remaining,family = poisson(link="log"),
+          data=trainData)
+  
+  NB2 <- glm.nb(runs_earned~factor(overs_remaining)+wickets_remaining+
+            overs_remaining:wickets_remaining+batting_team+bowling_team,
+            link="log",data=trainData)
+  
+  
+  NB.ME<- glmer.nb(runs_earned~overs_remaining+wickets_remaining+
+                   overs_remaining:wickets_remaining+bowling_team+
+                   (1|batting_team),data=trainData,nAGQ=0)
+  
+  
+  RF <- randomForest(runs_earned~factor(overs_remaining)+wickets_remaining+
+            overs_remaining:wickets_remaining+batting_team+bowling_team,
+            data=trainData, proximity=TRUE)
+  
+  
+  
+  
+  #OLS#
+  # Make predictions and compute MAE, and RMSE #
+  predictions <- lm %>% predict(testData, type = "response")
+  predictions <- as.data.frame(predictions)
+  names(predictions)[1] <- 'Pred'
+  mae <- MAE(predictions$Pred, as.numeric(testData$runs_earned))
+  rmse <- RMSE(predictions$Pred, as.numeric(testData$runs_earned))
+
+  #assign(paste("logit4_5",i, sep=""), logit4_5) #Save each model
+  PCLM[1,] <- c("LM",i,mae,rmse)
+  
+  
+  #Poisson#
+  # Make predictions and compute MAE, and RMSE #
+  predictions <- P %>% predict(testData, type = "response")
+  predictions <- as.data.frame(predictions)
+  names(predictions)[1] <- 'Pred'
+  mae <- MAE(exp(predictions$Pred), as.numeric(testData$runs_earned)) #Back to original scale
+  rmse <- RMSE(exp(predictions$Pred), as.numeric(testData$runs_earned))
+
+  #assign(paste("logit4_5",i, sep=""), logit4_5) #Save each model
+  PCPM[1,] <- c("Poisson",i,mae,rmse)
+  
+
+  
+  #NB#
+  # Make predictions and compute MAE, and RMSE #
+  predictions <- NB2 %>% predict(testData, type = "response")
+  predictions <- as.data.frame(predictions)
+  names(predictions)[1] <- 'Pred'
+  mae <-  MAE(exp(predictions$Pred), as.numeric(testData$runs_earned)) #Back to original scale
+  rmse <- RMSE(exp(predictions$Pred), as.numeric(testData$runs_earned))
+
+  #assign(paste("logit4_5",i, sep=""), logit4_5) #Save each model
+  PCNB[1,] <- c("NB",i,mae,rmse)
+  
+  
+  
+  
+  #M.E. NB#
+  # Make predictions and compute MAE, and RMSE #
+  predictions <- NB.ME %>% predict(testData, type = "response")
+  predictions <- as.data.frame(predictions)
+  names(predictions)[1] <- 'Pred'
+  mae <- MAE(predictions$Pred, as.numeric(testData$runs_earned))
+  rmse <- RMSE(predictions$Pred, as.numeric(testData$runs_earned))
+
+  #assign(paste("logit4_5",i, sep=""), logit4_5) #Save each model
+  PCNB.ME[1,] <- c("NB.ME",i,mae,rmse)
+  
+  
+  
+  #RF#
+  # Make predictions and compute MAE, and RMSE #
+  predictions <- RF %>% predict(testData, type = "response")
+  predictions <- as.data.frame(predictions)
+  names(predictions)[1] <- 'Pred'
+  mae <- MAE(predictions$Pred, as.numeric(testData$runs_earned))
+  rmse <- RMSE(predictions$Pred, as.numeric(testData$runs_earned))
+
+  #assign(paste("logit4_5",i, sep=""), logit4_5) #Save each model
+  PCRF[1,] <- c("RF",i,mae,rmse)
+  
+  
+  
+
+  
+  Prediction.Capability <- rbind(Prediction.Capability,PCLM,PCPM,PCNB,PCNB.ME,PCRF)
+}
+
+Prediction.Capability <- Prediction.Capability[order(Prediction.Capability$Model),]
+
+
+
+
+```
+
+
+The negative binomial count model performs the best when looking at the MAE and second best using RMSE. The linear regression model, although poorly specified, also does a good job at predicting runs earned compared to the other models. The mixed effects negative binomial and Poisson regression models perform the worst in this case. 
+
+
+```{r Best_Models}
+
+Prediction.Capability <-  Prediction.Capability %>% 
+  mutate_at(vars( MAE, RMSE), as.numeric)
+
+
+aggregate(Prediction.Capability[, 3:4], list(Prediction.Capability$Model), mean)
+
+```
+
+Overall, including additional variables or terms reflecting the individual players could go a long way in improving these models. It is clear that wickets remaining and overs remaining impact the number of runs teams earn.
+
+<h3>Resources </h3>
+
+* lmer: https://www.rdocumentation.org/packages/lme4/versions/1.1-33/topics/lmer
+
+* Plotly: https://plotly.com/r/
+
+* randomForest: https://www.rdocumentation.org/packages/randomForest/versions/4.7-1.1/topics/randomForest
+
+* sjPlot: https://www.rdocumentation.org/packages/sjPlot/versions/2.8.14
+
+
+
+
+
